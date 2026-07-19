@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "reshala_v2",
+  "project_id": "97f7c35e-ef0d-4f3c-8e9e-a3f891b9bc17"
+}
