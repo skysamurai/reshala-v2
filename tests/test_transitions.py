@@ -50,6 +50,10 @@ class TestTransitionTable:
     def test_idle_to_sending_order_not_allowed(self):
         assert not TransitionTable.is_allowed(FSMState.IDLE, FSMState.SENDING_ORDER)
 
+    def test_waiting_to_waiting_not_allowed(self):
+        """WAITING → WAITING is not a transition (no state change)."""
+        assert not TransitionTable.is_allowed(FSMState.WAITING, FSMState.WAITING)
+
     def test_shutdown_is_terminal(self):
         for state in FSMState:
             if state != FSMState.SHUTDOWN:
