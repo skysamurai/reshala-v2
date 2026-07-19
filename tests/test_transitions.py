@@ -65,6 +65,18 @@ class TestTransitionTable:
     def test_recovering_to_error_allowed(self):
         assert TransitionTable.is_allowed(FSMState.RECOVERING, FSMState.ERROR)
 
+    def test_recovering_to_wait_fill_allowed(self):
+        """RECOVERING → WAIT_FILL is valid during exchange reconciliation."""
+        assert TransitionTable.is_allowed(FSMState.RECOVERING, FSMState.WAIT_FILL)
+
+    def test_recovering_to_verify_allowed(self):
+        """RECOVERING → VERIFY is valid when unknown orders exist."""
+        assert TransitionTable.is_allowed(FSMState.RECOVERING, FSMState.VERIFY)
+
+    def test_recovering_to_active_allowed(self):
+        """RECOVERING → ACTIVE is valid when recent fills found."""
+        assert TransitionTable.is_allowed(FSMState.RECOVERING, FSMState.ACTIVE)
+
     def test_error_to_idle_allowed(self):
         assert TransitionTable.is_allowed(FSMState.ERROR, FSMState.IDLE)
 

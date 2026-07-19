@@ -156,7 +156,14 @@ class TransitionTable:
         }),
         FSMState.RECOVERING: frozenset({
             FSMState.IDLE,
+            FSMState.WAIT_FILL,     # open orders found on exchange
+            FSMState.VERIFY,        # unknown orders need verification
+            FSMState.ACTIVE,        # recent fills found, position is active
             FSMState.ERROR,
+            FSMState.PAUSED_MANUAL,
+            FSMState.PAUSED_RISK,
+            FSMState.PAUSED_API,
+            FSMState.PAUSED_EXCHANGE,
             FSMState.SHUTDOWN,
         }),
         FSMState.SHUTDOWN: frozenset(),
