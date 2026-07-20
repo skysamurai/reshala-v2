@@ -15,9 +15,10 @@ log = logging.getLogger(__name__)
 class AIService:
     """Pluggable AI decision service. Provider can be DeepSeek, Claude, etc."""
 
-    def __init__(self, bus, provider=None):
+    def __init__(self, bus, provider=None, market_data=None):
         self._bus = bus
         self._provider = provider
+        self._market_data = market_data  # MarketDataProvider or None
 
     async def request_decision(self, fsm: PositionFSM, state: ExchangeState) -> None:
         """Request AI decision asynchronously. Result comes as AICompleted event."""
@@ -41,13 +42,24 @@ class AIService:
         position: dict | None, history: list, correlation_id: str,
         balance: float = 0.0,
     ) -> None:
+        # Fetch real market data if provider is configured
+        technical = None
+        market = None
+        if self._market_data:
+            try:
+                ctx = await self._market_data.get_full_context(symbol)
+                technical = ctx.get("technical", {})
+                market = ctx.get("market", {})
+            except Exception:
+                log.warning("Market data fetch failed for %s, AI will use position-only context", symbol)
+
         try:
             decision = await self._provider.decide(
                 symbol=symbol,
                 position=position,
                 history=history,
-                technical=None,
-                market=None,
+                technical=technical,
+                market=market,
                 balance=balance,
             )
             event = AICompleted(
