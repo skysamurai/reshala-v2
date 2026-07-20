@@ -4,6 +4,7 @@ from domain.events.base import Event, EventType
 
 @dataclass
 class AICompleted(Event):
+    symbol: str = ""
     decision: dict = field(default_factory=dict)
     operation_id: str = ""
     state_version: int = 0
