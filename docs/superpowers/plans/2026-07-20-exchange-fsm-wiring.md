@@ -318,24 +318,41 @@ Handler = Callable[[BaseCommand], Awaitable[None]]
 
 
 class CommandBus:
-    """Commands can be rejected. Events are immutable facts."""
+    """Commands can be rejected. Events are immutable facts.
+    
+    Idempotency guarantee: same operation_id + sequence never executes twice.
+    """
 
     def __init__(self):
         self._handlers: dict[type, list[Handler]] = {}
+        self._processed: set[str] = set()  # dedup: "operation_id:seq"
+        self._locks: dict[str, asyncio.Lock] = {}
 
-    def subscribe(self, command_type: type, handler: Handler) -> None: ...
+    def subscribe(self, command_type: type, handler: Handler) -> None:
+        self._handlers.setdefault(command_type, []).append(handler)
 
     async def send(self, command: BaseCommand) -> bool:
-        """Returns True if accepted, False if no handler."""
-        handlers = self._handlers.get(type(command), [])
-        if not handlers:
-            return False
-        for handler in handlers:
-            try:
-                await handler(command)
-            except Exception:
-                log.exception("Command handler failed for %s", type(command).__name__)
-        return True
+        """Returns True if accepted and executed. False if duplicate."""
+        dedup_key = f"{command.operation_id}:{command.sequence}"
+        
+        lock = self._locks.setdefault(command.operation_id, asyncio.Lock())
+        async with lock:
+            if dedup_key in self._processed:
+                log.warning("Duplicate command blocked: %s", dedup_key)
+                return False
+            
+            handlers = self._handlers.get(type(command), [])
+            if not handlers:
+                return False
+            
+            for handler in handlers:
+                try:
+                    await handler(command)
+                except Exception:
+                    log.exception("Command handler failed for %s", type(command).__name__)
+            
+            self._processed.add(dedup_key)
+            return True
 ```
 
 ```python
@@ -451,12 +468,15 @@ class EventBus:
 
     def __init__(self, max_queue: int = 10_000):
         self._queues: dict[EventType, asyncio.Queue] = {}
-        self._price_latest: dict[str, PriceUpdate] = {}  # coalescing buffer
+        self._max = max_queue
+        # Double-buffering for atomic price swap — no race condition
+        self._price_buffer: dict[str, PriceUpdate] = {}
+        self._drain_buffer: dict[str, PriceUpdate] = {}
         ...
 
     async def publish(self, event: Event) -> bool:
         if event.type == EventType.PRICE_UPDATE:
-            self._price_latest[event.symbol] = event  # coalesce
+            self._price_buffer[event.symbol] = event  # atomic dict insert
             return True
 
         queue = self._queues.setdefault(event.type, asyncio.Queue(maxsize=self._max))
@@ -466,22 +486,31 @@ class EventBus:
         except asyncio.QueueFull:
             if event.type in self.DROP_SAFE:
                 return False
-            await queue.put(event)  # block for critical events
+            await queue.put(event)  # block for critical
             return True
 
     async def _drain_prices(self):
-        """Periodically drain coalesced prices into queue."""
+        """Periodically drain: atomic buffer swap → no ConcurrentModification."""
         while self._running:
-            for symbol, event in list(self._price_latest.items()):
-                queue = self._queues.setdefault(EventType.PRICE_UPDATE,
-                                                asyncio.Queue(maxsize=self._max))
+            await asyncio.sleep(1.0)
+            # Atomic swap — Python assignment is atomic
+            self._drain_buffer, self._price_buffer = (
+                self._price_buffer, self._drain_buffer
+            )
+            # Clear the new active buffer (old drain_buffer)
+            self._price_buffer.clear()
+
+            # Drain the old active buffer (now drain_buffer)
+            for symbol, event in self._drain_buffer.items():
+                queue = self._queues.setdefault(
+                    EventType.PRICE_UPDATE, asyncio.Queue(maxsize=self._max)
+                )
                 try:
                     queue.put_nowait(event)
                 except asyncio.QueueFull:
                     queue.get_nowait()  # drop oldest
                     queue.put_nowait(event)
-            self._price_latest.clear()
-            await asyncio.sleep(1.0)
+            self._drain_buffer.clear()
 ```
 
 - [ ] **Step 4: Run tests — PASS**
@@ -494,11 +523,13 @@ python -m pytest tests/unit/engine/test_event_bus.py tests/test_event_bus.py -v
 
 ---
 
-### Task 1.5: Move EventLogger to `logging/`
+### Task 1.5: Move EventLogger to `event_logging/`
+
+> **Fix #5:** `logging/` переопределил бы стандартный модуль Python. Переименован в `event_logging/`.
 
 **Files:**
-- Create: `logging/__init__.py`
-- Move: `engine/event_logger.py` → `logging/event_logger.py`
+- Create: `event_logging/__init__.py`
+- Move: `engine/event_logger.py` → `event_logging/event_logger.py`
 - Update: `engine/event_logger.py` → re-export
 
 - [ ] **Step 1: Move and update imports**
@@ -610,12 +641,16 @@ from domain.events import Event, EventType
 
 
 class ExchangeState:
-    """Changed ONLY through apply(event). No direct writes."""
+    """Changed ONLY through apply(event). No direct writes.
+    
+    Maintains in-memory event log (last 10k events) for AI history queries.
+    """
 
     def __init__(self):
         self._positions: dict[str, dict] = {}
         self._orders: dict[str, dict] = {}
         self._balance: dict[str, float] = {}
+        self._event_log: list[Event] = []  # compact in-memory history
         self.version: int = 0
 
         self._handlers = {
@@ -629,7 +664,17 @@ class ExchangeState:
         handler = self._handlers.get(event.type)
         if handler:
             handler(event)
+        self._event_log.append(event)
+        if len(self._event_log) > 10_000:
+            self._event_log = self._event_log[-5000:]  # keep tail
         self.version += 1
+
+    # ...
+
+    def get_position_history(self, symbol: str, limit: int = 100) -> list[Event]:
+        """Return recent events for a specific symbol. Used by AI Service."""
+        return [e for e in self._event_log
+                if getattr(e, 'symbol', None) == symbol][-limit:]
 
     def _on_position(self, event) -> None:
         self._positions[event.symbol] = {
@@ -765,7 +810,60 @@ class TestReplay:
 
 - [ ] **Step 2: Run — FAIL**
 
-- [ ] **Step 3: Implement snapshotter + replay**
+- [ ] **Step 2.5: Create EventSerializer — single source of truth for serialization**
+
+```python
+# domain/events/serialization.py
+"""Single source of truth for event serialization/deserialization.
+Both EventLogger (write) and ReplayEngine (read) use this — no duplication."""
+import json
+from dataclasses import fields
+from domain.events import Event, EventType, PriceUpdate, PositionChanged
+from domain.events import OrderFilled, OrderRejected, OrderCancelled
+from domain.events import AICompleted, TimerTick, RiskLimitHit, SystemShutdown
+
+
+class EventSerializer:
+    _registry: dict[str, type[Event]] = {
+        "PRICE_UPDATE": PriceUpdate,
+        "POSITION_CHANGED": PositionChanged,
+        "ORDER_FILLED": OrderFilled,
+        "ORDER_REJECTED": OrderRejected,
+        "ORDER_CANCELLED": OrderCancelled,
+        "AI_COMPLETED": AICompleted,
+        "TIMER_TICK": TimerTick,
+        "RISK_LIMIT_HIT": RiskLimitHit,
+        "SYSTEM_SHUTDOWN": SystemShutdown,
+    }
+
+    def to_json(self, event: Event) -> str:
+        data = {"type": event.type.name}
+        for f in fields(event):
+            val = getattr(event, f.name)
+            if f.name == "type":
+                data["type"] = val.name if hasattr(val, "name") else str(val)
+            else:
+                data[f.name] = val
+        return json.dumps(data, ensure_ascii=False, default=str)
+
+    def from_json(self, line: str) -> Event:
+        raw = json.loads(line)
+        type_name = raw.pop("type", "")
+        event_cls = self._registry.get(type_name)
+        if event_cls is None:
+            raise ValueError(f"Unknown event type: {type_name}")
+        # Filter to only known field names
+        field_names = {f.name for f in fields(event_cls)}
+        kwargs = {k: v for k, v in raw.items() if k in field_names}
+        return event_cls(**kwargs)
+
+    @classmethod
+    def register(cls, type_name: str, event_cls: type[Event]) -> None:
+        """Register a new event type (called during init for extensibility)."""
+        cls._registry[type_name] = event_cls
+```
+
+- [ ] **Step 3: Implement snapshotter + replay using EventSerializer**
 
 ```python
 # domain/recovery/snapshot.py
@@ -798,15 +896,19 @@ class StateSnapshotter:
 
 ```python
 # domain/recovery/replay.py
-import json
 import logging
 from domain.exchange_state import ExchangeState
+from domain.events.serialization import EventSerializer
 
 log = logging.getLogger(__name__)
 
 
 class ReplayEngine:
+    def __init__(self):
+        self._serializer = EventSerializer()
+
     def replay(self, snap_path: str, log_path: str) -> ExchangeState:
+        import json
         with open(snap_path) as f:
             snap = json.load(f)
         state = ExchangeState.from_snapshot(snap)
@@ -814,20 +916,16 @@ class ReplayEngine:
         try:
             with open(log_path) as f:
                 for line in f:
-                    raw = json.loads(line)
-                    type_name = raw.get("type", "")
-                    if type_name == "POSITION_CHANGED":
-                        from domain.events import PositionChanged
-                        state.apply(PositionChanged(
-                            symbol=raw["symbol"],
-                            side=raw.get("side", ""),
-                            size=raw.get("size", 0),
-                            unrealised_pnl=raw.get("unrealised_pnl", 0),
-                        ))
+                    line = line.strip()
+                    if not line:
+                        continue
+                    event = self._serializer.from_json(line)
+                    state.apply(event)
         except FileNotFoundError:
             pass
 
-        log.info("Replay: restored version %d from snapshot", state.version)
+        log.info("Replay: restored version %d from snapshot (%d events)",
+                 state.version, len(state._event_log))
         return state
 ```
 

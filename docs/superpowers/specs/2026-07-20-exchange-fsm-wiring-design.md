@@ -120,7 +120,7 @@ reshala-v2/
 │       ├── deepseek.py
 │       └── claude.py
 │
-├── logging/                         # Black box event log
+├── event_logging/                   # Black box event log
 │   ├── __init__.py
 │   └── event_logger.py              # JSONL append-only logger
 │
@@ -534,7 +534,7 @@ exchange/streams/  (Ticker / Position / Execution / Order)
 engine/bus/EventBus  (факты)
     │
     ├── domain/exchange_state.py.apply(event)  ← event-sourced
-    ├── logging/event_logger.py                ← JSONL black box
+    ├── event_logging/event_logger.py           ← JSONL black box
     ├── engine/bus/subscriptions.py (DLQ)      ← unprocessable
     └── engine/trading_engine.py._dispatch()
             │
