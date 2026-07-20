@@ -6,6 +6,28 @@
 
 ---
 
+## Layer Dependency
+
+```
+Application  ── engine/trading_engine.py, ai/
+     │            (координирует, но не содержит бизнес-правил)
+     ▼
+Domain       ── domain/exchange_state.py, domain/events/, domain/commands/,
+     │            domain/fsm/, domain/recovery/
+     ▼            (бизнес-логика — НЕ знает про Bybit, MCP, WebSocket)
+Infrastructure ── exchange/, engine/bus/, logging/
+                  (знает про Bybit MCP, транспорт, сериализацию)
+```
+
+**Главное правило:** Domain НЕ знает про Infrastructure.
+
+- ✅ `PositionFSM → OrderCommand` (команда — это доменный объект)
+- ❌ `PositionFSM → BybitClient` (никогда)
+- ✅ `TickerStream → PriceUpdate → EventBus` (инфраструктура публикует доменные события)
+- ❌ `ExchangeState.fetch_from_bybit()` (домен не ходит в API)
+
+---
+
 ## Architecture Principles
 
 1. **Биржа — единственный источник истины.** Любое расхождение разрешается в пользу биржи.
@@ -22,38 +44,117 @@
 ## 1. File Structure
 
 ```
-engine/
-├── exchange/
+reshala-v2/
+│
+├── domain/                          # Бизнес-логика — не знает про Bybit
 │   ├── __init__.py
-│   ├── adapter.py          # ExchangeAdapter — MCP REST wrapper
-│   ├── streams.py          # TickerStream, PositionStream, ExecutionStream, OrderStream
-│   ├── stream_manager.py   # StreamManager — lifecycle, health, restart
-│   ├── state.py            # ExchangeState — event-sourced cache
-│   ├── mapper.py           # Raw Bybit data → typed Events
-│   ├── gap_detector.py     # Per-stream sequence gap detection
-│   ├── reconnect.py        # ReconnectPolicy — exponential backoff
-│   ├── commands.py         # OrderCommand, CancelCommand
-│   └── snapshot.py         # StateSnapshotter — snapshot + replay
-├── bus/
+│   │
+│   ├── events/                      # Типизированные события (факты)
+│   │   ├── __init__.py
+│   │   ├── base.py                  # Event, EventType enum
+│   │   ├── market.py                # PriceUpdate
+│   │   ├── orders.py                # OrderFilled, OrderRejected, OrderCancelled
+│   │   ├── positions.py             # PositionChanged, FundingChanged
+│   │   ├── ai.py                    # AICompleted
+│   │   ├── system.py                # TimerTick, SystemShutdown, HealthEvent
+│   │   └── risk.py                  # RiskLimitHit
+│   │
+│   ├── commands/                    # Команды (намерения — можно отклонить)
+│   │   ├── __init__.py
+│   │   ├── base.py                  # BaseCommand
+│   │   ├── order.py                 # OrderCommand
+│   │   ├── cancel.py                # CancelCommand
+│   │   └── close_position.py        # ClosePositionCommand
+│   │
+│   ├── fsm/                         # Per-position state machine
+│   │   ├── __init__.py
+│   │   ├── states.py                # FSMState, ActiveSubState, WaitReason
+│   │   ├── transitions.py           # TransitionTable
+│   │   ├── position_fsm.py          # PositionFSM
+│   │   └── supervisor.py            # GlobalSupervisor
+│   │
+│   ├── recovery/                    # Восстановление после рестарта
+│   │   ├── __init__.py
+│   │   ├── manager.py               # RecoveryManager
+│   │   ├── snapshot.py              # StateSnapshotter
+│   │   └── replay.py                # Event replay engine
+│   │
+│   └── exchange_state.py            # Event-sourced cache биржи
+│
+├── exchange/                        # Инфраструктура — знает про Bybit MCP
 │   ├── __init__.py
-│   ├── event_bus.py        # EventBus (existing, upgraded: bounded queues, priority)
-│   └── command_bus.py      # CommandBus — separate from EventBus
-├── trading_engine.py       # TradingEngine — main loop, dispatch, graceful shutdown
-├── ai_service.py           # AIService — AI request/response, separate from engine
-└── __init__.py             # Updated public API
-
-tests/
-├── test_exchange_adapter.py
-├── test_streams.py
-├── test_stream_manager.py
-├── test_exchange_state.py
-├── test_mapper.py
-├── test_gap_detector.py
-├── test_reconnect.py
-├── test_command_bus.py
-├── test_trading_engine.py
-└── test_ai_service.py
+│   ├── adapter.py                   # ExchangeAdapter — MCP REST wrapper
+│   ├── mapper.py                    # Raw Bybit data → typed Events
+│   │
+│   ├── streams/                     # WebSocket → EventBus producers
+│   │   ├── __init__.py
+│   │   ├── base.py                  # BaseStream, StreamStatus enum
+│   │   ├── ticker.py                # TickerStream → PriceUpdate
+│   │   ├── position.py              # PositionStream → PositionChanged ⭐
+│   │   ├── execution.py             # ExecutionStream → OrderFilled ⭐
+│   │   ├── order.py                 # OrderStream → OrderRejected/Cancelled
+│   │   ├── manager.py               # StreamManager — lifecycle, health, restart
+│   │   ├── gap_detector.py          # Per-stream sequence gap detection
+│   │   └── reconnect.py             # ReconnectPolicy — exponential backoff
+│   │
+│   └── __init__.py
+│
+├── engine/                          # Application layer
+│   ├── __init__.py
+│   ├── trading_engine.py            # TradingEngine — main loop, dispatch
+│   │
+│   ├── bus/                         # Message buses
+│   │   ├── __init__.py
+│   │   ├── event_bus.py             # EventBus (upgraded: bounded queues, priority)
+│   │   ├── command_bus.py            # CommandBus — separate from EventBus
+│   │   └── subscriptions.py         # Subscription routing + Dead Letter Queue
+│   │
+│   └── supervisor.py                # GlobalSupervisor health checks
+│
+├── ai/                              # AI decision service
+│   ├── __init__.py
+│   ├── service.py                   # AIService — request/response lifecycle
+│   ├── prompts.py                   # Prompt templates
+│   └── providers/                   # Model backends
+│       ├── __init__.py
+│       ├── deepseek.py
+│       └── claude.py
+│
+├── logging/                         # Black box event log
+│   ├── __init__.py
+│   └── event_logger.py              # JSONL append-only logger
+│
+└── tests/
+    ├── unit/
+    │   ├── domain/
+    │   │   ├── test_exchange_state.py
+    │   │   ├── test_events.py
+    │   │   ├── test_commands.py
+    │   │   ├── test_transitions.py
+    │   │   ├── test_position_fsm.py
+    │   │   ├── test_supervisor.py
+    │   │   └── test_recovery.py
+    │   ├── exchange/
+    │   │   ├── test_adapter.py
+    │   │   ├── test_streams.py
+    │   │   ├── test_stream_manager.py
+    │   │   ├── test_mapper.py
+    │   │   ├── test_gap_detector.py
+    │   │   └── test_reconnect.py
+    │   └── engine/
+    │       ├── test_event_bus.py
+    │       ├── test_command_bus.py
+    │       └── test_trading_engine.py
+    ├── integration/
+    │   ├── test_full_flow.py         # EventBus → FSM → CommandBus
+    │   └── test_recovery_flow.py     # RecoveryManager → ExchangeState → FSM
+    ├── replay/
+    │   └── test_replay.py            # Snapshot + EventLog → full state recovery
+    └── stress/
+        └── test_reconnect.py         # ReconnectPolicy under failure
 ```
+
+**Total:** ~55 small files instead of ~10 large ones. Каждый файл — одна ответственность.
 
 ---
 
@@ -339,11 +440,11 @@ class AIService:
             correlation_id=str(uuid.uuid4()),
         )
         # Запускаем асинхронно — не блокируем движок
-        asyncio.create_task(self._call_deepseek(request))
+        asyncio.create_task(self._call_model(request))
 
-    async def _call_deepseek(self, request: AIRequest) -> None:
+    async def _call_model(self, request: AIRequest) -> None:
         try:
-            decision = await self._model.decide(request)
+            decision = await self._provider.decide(request)
             event = AICompleted(
                 decision=decision,
                 operation_id=request.correlation_id,
@@ -354,6 +455,18 @@ class AIService:
         except Exception:
             # Retry or fallback model
             pass
+```
+
+**Провайдеры:**
+
+```python
+# ai/providers/deepseek.py
+class DeepSeekProvider:
+    async def decide(self, request: AIRequest) -> dict: ...
+
+# ai/providers/claude.py
+class ClaudeProvider:
+    async def decide(self, request: AIRequest) -> dict: ...
 ```
 
 ---
@@ -415,27 +528,27 @@ class HealthEvent(Event):
 Bybit WS
     │
     ▼
-Streams (Ticker / Position / Execution / Order)
+exchange/streams/  (Ticker / Position / Execution / Order)
     │
     ▼
-EventBus (факты)
+engine/bus/EventBus  (факты)
     │
-    ├── ExchangeState.apply(event)  ← event-sourced cache
-    ├── EventLogger                 ← JSONL black box
-    ├── DeadLetterQueue             ← unprocessable events
-    └── TradingEngine._dispatch()
+    ├── domain/exchange_state.py.apply(event)  ← event-sourced
+    ├── logging/event_logger.py                ← JSONL black box
+    ├── engine/bus/subscriptions.py (DLQ)      ← unprocessable
+    └── engine/trading_engine.py._dispatch()
             │
             ▼
-        PositionFSM  ← читает ExchangeState, НЕ сырые события
+        domain/fsm/position_fsm.py  ← читает ExchangeState
             │
             ▼
-        OrderCommand  ← контракт, не знает про Bybit
+        domain/commands/order.py    ← контракт OrderCommand
             │
             ▼
-        CommandBus (намерения)
+        engine/bus/CommandBus  (намерения)
             │
             ▼
-        ExchangeAdapter.place_order()  ← тонкая MCP-обёртка
+        exchange/adapter.py.place_order()  ← MCP-обёртка
             │
             ▼
         Bybit REST
@@ -446,14 +559,13 @@ EventBus (факты)
 ## 13. Scope Boundaries
 
 **В этом spec:**
-- Stream layer (4 stream types + StreamManager)
-- ExchangeState (event-sourced cache + snapshot/replay)
-- CommandBus + OrderCommand контракт
-- ExchangeAdapter (MCP REST wrapper, без бизнес-логики)
-- TradingEngine (per-symbol dispatcher, main loop)
-- AIService (отдельный от движка)
+- Layer dependency diagram + 8 architecture principles
+- Domain layer: events (7 files), commands (4 files), FSM (4 files), recovery (3 files), ExchangeState
+- Exchange layer: adapter, mapper, streams (8 files), ReconnectPolicy, GapDetector
+- Engine layer: TradingEngine, EventBus, CommandBus, subscriptions/DLQ
+- AI service with pluggable providers
 - Correlation ID, Dead Letter Queue, Health Events
-- ReconnectPolicy, GapDetector
+- ~55 small files, каждый с одной ответственностью
 
 **Out of scope (отдельные specs):**
 - AI prompt engineering
@@ -470,3 +582,4 @@ EventBus (факты)
 | Date | Change |
 |------|--------|
 | 2026-07-20 | Initial spec — Exchange + FSM wiring design |
+| 2026-07-20 | v2: polished file structure — domain/exchange/engine/ai/logging layers, packages instead of large files, tests restructured into unit/integration/replay/stress |
