@@ -140,6 +140,8 @@ def build_user_message(
         f"- Average entry: ${position.get('avg_price', 0):.4f}",
         f"- Mark price: ${mark_price:.4f}  ({be_pct:+.2f}% from entry)",
         f"- Unrealised PNL: ${position.get('unrealised_pnl', 0):.2f}",
+        f"- Cumulative Realised PNL: ${position.get('cum_realised_pnl', 0):.2f}",
+        f"- TOTAL PNL (uPNL + cPNL): ${position.get('unrealised_pnl', 0) + position.get('cum_realised_pnl', 0):.2f}",
         f"- ROE: {position.get('roe_percent', 0):.1f}%",
         f"- Leverage: {position.get('leverage', 7)}x",
         f"- Margin: ${position.get('margin', 0):.2f}",
