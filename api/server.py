@@ -69,10 +69,10 @@ class ApiServer:
 
         @app.websocket("/api/ws")
         async def ws_endpoint(ws: WebSocket):
-            # Auth via query param or header
+            # Auth via header only (query params get logged by proxies)
             expected = os.environ.get("RESHALA_API_KEY", "")
             if expected:
-                token = ws.query_params.get("token") or ws.headers.get("x-api-key", "")
+                token = ws.headers.get("x-api-key", "")
                 if token != expected:
                     await ws.close(code=4003, reason="Invalid API key")
                     return
