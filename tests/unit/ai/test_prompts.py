@@ -64,6 +64,22 @@ class TestPrompts:
         assert "LONG" in msg
         assert "3200" in msg
 
+    def test_parse_broken_json_returns_waiter(self):
+        """Malformed JSON should return WAIT fallback, never crash."""
+        result = parse_response('not json at all')
+        assert result["strategy"] == "WAIT"
+        assert "JSON parse error" in result["reasoning"]
+
+    def test_parse_text_with_json_inside(self):
+        """Text surrounding JSON should still extract correctly."""
+        result = parse_response('Some text before {"strategy": "WAIT", "reasoning": "ok", "order": {"side": null, "qty_usd": 0, "leverage": 7, "take_profit_percent": 0, "stop_loss_percent": 0}, "wait_minutes": 0} and after')
+        assert result["strategy"] == "WAIT"
+
+    def test_parse_trailing_comma_survives(self):
+        """JSON with trailing comma should be fixed, not crash."""
+        result = parse_response('{"strategy": "DCA_SHORT", "reasoning": "test", "order": {"side": "Sell", "qty_usd": 10, "leverage": 7, "take_profit_percent": 0, "stop_loss_percent": 0}, "wait_minutes": 0,}')
+        assert result["strategy"] == "DCA_SHORT"
+
     def test_absolute_prohibition_in_short_prompt(self):
         assert "NEVER suggest closing" in SYSTEM_PROMPT_SHORT
         assert "ABSOLUTE PROHIBITION" in SYSTEM_PROMPT_SHORT

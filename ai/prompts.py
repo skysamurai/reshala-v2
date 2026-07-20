@@ -179,10 +179,44 @@ def get_system_prompt(side: str) -> str:
 
 
 def parse_response(text: str) -> dict:
-    """Extract JSON from AI response (handles markdown code blocks)."""
+    """Extract JSON from AI response. Handles markdown, broken JSON, text wrappers."""
     text = text.strip()
+
+    # Extract from markdown code blocks
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
-    return json.loads(text)
+
+    # Find JSON object boundaries if there's surrounding text
+    if not text.startswith("{"):
+        start = text.find("{")
+        if start != -1:
+            end = text.rfind("}")
+            if end != -1:
+                text = text[start:end + 1]
+
+    # Try strict parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to fix common issues
+    import re
+    # Fix unescaped newlines in strings (common DeepSeek bug)
+    text = re.sub(r'(?<!\\)"(\s*\n\s*)', r'\\n', text)
+    # Fix trailing commas
+    text = re.sub(r',\s*}', '}', text)
+    text = re.sub(r',\s*]', ']', text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        # Return safe fallback
+        return {
+            "strategy": "WAIT",
+            "reasoning": f"JSON parse error: {e}",
+            "order": {"side": None, "qty_usd": 0, "leverage": 7, "take_profit_percent": 0, "stop_loss_percent": 0},
+            "wait_minutes": 5,
+        }
