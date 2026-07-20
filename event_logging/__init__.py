@@ -1,4 +1,4 @@
-"""Backward-compatible re-export from event_logging."""
+"""Black box event logger."""
 from event_logging.event_logger import EventLogger
 
 __all__ = ["EventLogger"]

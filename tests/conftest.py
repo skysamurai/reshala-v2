@@ -1,7 +1,6 @@
 """Shared test fixtures for reshala-v2 tests."""
 import pytest
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
