@@ -6,11 +6,13 @@ Endpoints:
   WS   /api/ws            — real-time events (PriceUpdate, OrderFilled, FSM transitions)
 """
 import json
+import os
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Security
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -20,6 +22,16 @@ class CommandRequest(BaseModel):
     command: str       # "pause", "resume", "close", "status"
     symbol: str = ""   # target symbol (required for close)
     params: dict = {}
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    expected = os.environ.get("RESHALA_API_KEY", "")
+    if not expected:
+        return None  # no auth configured — allow (dev mode)
+    if api_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return api_key
 
 
 class ApiServer:
@@ -44,11 +56,11 @@ class ApiServer:
 
         app = FastAPI(title="Reshala v2 API", lifespan=lifespan)
 
-        @app.get("/api/status")
+        @app.get("/api/status", dependencies=[Depends(verify_api_key)])
         async def status():
             return JSONResponse(self._build_status())
 
-        @app.post("/api/command")
+        @app.post("/api/command", dependencies=[Depends(verify_api_key)])
         async def command(req: CommandRequest):
             from domain.events import UserCommand
             event = UserCommand(command=req.command, symbol=req.symbol, params=req.params)
@@ -57,6 +69,13 @@ class ApiServer:
 
         @app.websocket("/api/ws")
         async def ws_endpoint(ws: WebSocket):
+            # Auth via query param or header
+            expected = os.environ.get("RESHALA_API_KEY", "")
+            if expected:
+                token = ws.query_params.get("token") or ws.headers.get("x-api-key", "")
+                if token != expected:
+                    await ws.close(code=4003, reason="Invalid API key")
+                    return
             await ws.accept()
             self._ws_clients.append(ws)
             # Send initial snapshot
