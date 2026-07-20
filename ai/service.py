@@ -31,19 +31,24 @@ class AIService:
         history = state.get_position_history(fsm.symbol, limit=50)
 
         # Launch async — don't block the engine
+        balance = state.get_balance("USDT")
         asyncio.create_task(self._call_provider(
-            fsm.symbol, fsm.state_version, pos, history, correlation_id
+            fsm.symbol, fsm.state_version, pos, history, correlation_id, balance
         ))
 
     async def _call_provider(
         self, symbol: str, state_version: int,
         position: dict | None, history: list, correlation_id: str,
+        balance: float = 0.0,
     ) -> None:
         try:
             decision = await self._provider.decide(
                 symbol=symbol,
                 position=position,
                 history=history,
+                technical=None,
+                market=None,
+                balance=balance,
             )
             event = AICompleted(
                 symbol=symbol,

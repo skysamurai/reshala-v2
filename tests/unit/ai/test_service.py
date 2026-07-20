@@ -9,8 +9,8 @@ from engine.bus.event_bus import EventBus
 
 
 class MockProvider:
-    async def decide(self, symbol, position, history):
-        return {"strategy": "DCA_SHORT", "reasoning": "test decision"}
+    async def decide(self, symbol, position, history, **kwargs):
+        return {"strategy": "DCA_SHORT", "reasoning": "test decision", "order": {"side": "Sell", "qty_usd": 10.0}}
 
 
 class TestAIService:
